@@ -31,13 +31,10 @@ impl pgrx::PgHooks for Hooks {
             let createdb =
                 unsafe { PgBox::from_pg(pstmt.utilityStmt as *mut pg_sys::CreatedbStmt) };
 
-            // extract the target from the statement's dbname
-            let target = unsafe { core::ffi::CStr::from_ptr(createdb.dbname) }
-                .to_str()
-                .expect("Invalid dbname in CREATE DATABASE");
-
             // parse and handle relevant options
+            let mut strategy = None;
             let mut template = None;
+
             if !createdb.options.is_null() {
                 let options = unsafe { PgBox::from_pg(createdb.options) };
                 for index in 0..options.length {
@@ -45,7 +42,8 @@ impl pgrx::PgHooks for Hooks {
                     let element = unsafe { PgBox::from_pg(list_cell as *mut pg_sys::DefElem) };
                     let defname = unsafe { core::ffi::CStr::from_ptr(element.defname) }
                         .to_str()
-                        .expect("Invalid template name in CREATE DATABASE");
+                        .expect("Invalid defname in CREATE DATABASE");
+
                     let arg = unsafe { PgBox::from_pg(element.arg) }
                         .to_string()
                         .replace('\"', "");
@@ -54,29 +52,35 @@ impl pgrx::PgHooks for Hooks {
                         "template" => {
                             template = Some(arg);
                         }
-                        "strategy" if !arg.is_empty() && arg.to_lowercase() != "snapshot" => {
-                            // if a strategy is explicitly defined as something other than
-                            // "snapshot", forward the call to prev_hook instead
-                            return prev_hook(
-                                pstmt,
-                                query_string,
-                                read_only_tree,
-                                context,
-                                params,
-                                query_env,
-                                dest,
-                                completion_tag,
-                            );
+                        "strategy" => {
+                            strategy = Some(arg.to_lowercase());
                         }
-                        // FIXME: support more of the CREATE DATABASE options
                         _ => (),
                     }
                 }
-            };
+            }
 
-            // create the new branch using the top-level helper function
-            crate::branch(target, template.as_deref());
-            pgrx::HookResult::new(())
+            // tylko jeśli STRATEGY == snapshot → wykonaj snapshot
+            if matches!(strategy.as_deref(), Some("snapshot")) {
+                let target = unsafe { core::ffi::CStr::from_ptr(createdb.dbname) }
+                    .to_str()
+                    .expect("Invalid dbname in CREATE DATABASE");
+
+                crate::branch(target, template.as_deref());
+                pgrx::HookResult::new(())
+            } else {
+                // wszystko inne → przekieruj do poprzedniego hooka
+                prev_hook(
+                    pstmt,
+                    query_string,
+                    read_only_tree,
+                    context,
+                    params,
+                    query_env,
+                    dest,
+                    completion_tag,
+                )
+            }
         } else {
             prev_hook(
                 pstmt,
